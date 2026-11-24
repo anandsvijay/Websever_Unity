@@ -277,6 +277,7 @@ async function start() {
     };
 
     renderstreaming.onGotAnswer = (connectionId) => {
+      clearHandshakeRetry();
       if (!isUnityConnected) {
         isUnityConnected = true;
         waitingLogShown = false;
@@ -285,13 +286,13 @@ async function start() {
     };
 
     renderstreaming.onGotOffer = (connectionId) => {
+      clearHandshakeRetry();
       if (!isUnityConnected) {
         isUnityConnected = true;
         waitingLogShown = false;
         addLog(`Connected to Unity! (connectionId=${connectionId})`);
       }
-      addLog('Received video stream Offer from Unity. Applying codec preferences...');
-      applyMobileCodecPreferences();
+      addLog('Received video stream Offer from Unity.');
     };
 
     renderstreaming.onDisconnect = () => {
@@ -305,17 +306,13 @@ async function start() {
       const track = data.track;
       if (!track) return;
 
+      clearHandshakeRetry();
       if (!isUnityConnected) {
         isUnityConnected = true;
         waitingLogShown = false;
         addLog('Connected to Unity!');
       }
       addLog(`Received remote ${track.kind} track (id=${track.id}).`);
-
-      if (track.kind === 'video') {
-        hasReceivedVideoTrack = true;
-        clearHandshakeRetry();
-      }
 
       if (!videoElement.srcObject) {
         videoElement.srcObject = new MediaStream();
@@ -331,11 +328,17 @@ async function start() {
 
       track.onunmute = () => {
         addLog(`Remote ${track.kind} track unmuted (media packets flowing).`);
-        attemptPlay();
+        if (track.kind === 'video' || (videoElement.srcObject && videoElement.srcObject.getVideoTracks().length > 0)) {
+          attemptPlay();
+        }
       };
 
-      attemptPlay();
       if (track.kind === 'video') {
+        hasReceivedVideoTrack = true;
+        // Re-assign srcObject when video track is added after audio track so <video> attaches the video decoder
+        const currentStream = videoElement.srcObject;
+        videoElement.srcObject = currentStream;
+        attemptPlay();
         startVideoStatsCheck();
       }
     };
