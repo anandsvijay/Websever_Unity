@@ -30,6 +30,7 @@ app.get('/config', (req, res) => {
 
 // Serve static HTML/CSS/JS/module files directly from this folder
 app.use(express.static(__dirname));
+// Also support /receiver route if accessed via /receiver
 app.use('/receiver', express.static(__dirname));
 
 app.get('/', (req, res) => {
@@ -39,7 +40,7 @@ app.get('/', (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// WebSocket Signaling State
+// WebSocket Signaling State (Public Broadcast Mode compatible with Unity Broadcast component)
 const clients = new Map(); // Map<WebSocket, Set<string>>
 const connectionPair = new Map(); // Map<string, [WebSocket, WebSocket]>
 
@@ -56,47 +57,25 @@ function safeSend(ws, payload) {
   }
 }
 
-function cleanupSocket(ws) {
-  const connectionIds = clients.get(ws);
-  if (connectionIds) {
-    connectionIds.forEach((connectionId) => {
-      const pair = connectionPair.get(connectionId);
-      if (pair) {
-        const otherWs = pair[0] === ws ? pair[1] : pair[0];
-        safeSend(otherWs, { type: 'disconnect', connectionId });
-      }
-      connectionPair.delete(connectionId);
-    });
-  }
-  // Also check any connectionPair entries where ws was the responder
-  for (const [connectionId, pair] of connectionPair.entries()) {
-    if (pair[0] === ws || pair[1] === ws) {
-      const otherWs = pair[0] === ws ? pair[1] : pair[0];
-      safeSend(otherWs, { type: 'disconnect', connectionId });
-      connectionPair.delete(connectionId);
-    }
-  }
-  clients.delete(ws);
-}
-
 wss.on('connection', (ws) => {
-  ws.isAlive = true;
   clients.set(ws, new Set());
 
-  ws.on('pong', () => {
-    ws.isAlive = true;
-  });
-
   ws.on('close', () => {
-    cleanupSocket(ws);
-  });
-
-  ws.on('error', () => {
-    cleanupSocket(ws);
+    const connectionIds = clients.get(ws);
+    if (connectionIds) {
+      connectionIds.forEach((connectionId) => {
+        const pair = connectionPair.get(connectionId);
+        if (pair) {
+          const otherWs = pair[0] === ws ? pair[1] : pair[0];
+          safeSend(otherWs, { type: 'disconnect', connectionId });
+        }
+        connectionPair.delete(connectionId);
+      });
+    }
+    clients.delete(ws);
   });
 
   ws.on('message', (raw) => {
-    ws.isAlive = true;
     let msg;
     try {
       msg = JSON.parse(raw.toString());
@@ -129,25 +108,12 @@ wss.on('connection', (ws) => {
       }
       case 'offer': {
         const data = msg.data || {};
-        const connectionId = data.connectionId || msg.from;
+        const connectionId = data.connectionId;
         const newOffer = {
           sdp: data.sdp,
           datetime: Date.now(),
           polite: false
         };
-
-        // If this connectionId already has a paired peer (e.g. Unity sending renegotiation video offer),
-        // route directly to the paired peer while keeping the pair intact
-        if (connectionPair.has(connectionId)) {
-          const pair = connectionPair.get(connectionId);
-          const otherWs = pair[0] === ws ? pair[1] : (pair[1] === ws ? pair[0] : null);
-          if (otherWs && otherWs.readyState === WebSocket.OPEN) {
-            connectionPair.set(connectionId, [ws, otherWs]);
-            safeSend(otherWs, { from: connectionId, to: '', type: 'offer', data: newOffer });
-            break;
-          }
-        }
-
         connectionPair.set(connectionId, [ws, null]);
         clients.forEach((_v, clientWs) => {
           if (clientWs !== ws) {
@@ -158,7 +124,7 @@ wss.on('connection', (ws) => {
       }
       case 'answer': {
         const data = msg.data || {};
-        const connectionId = data.connectionId || msg.from;
+        const connectionId = data.connectionId;
         const connectionIds = getOrCreateConnectionIds(ws);
         connectionIds.add(connectionId);
         const newAnswer = {
@@ -174,23 +140,13 @@ wss.on('connection', (ws) => {
       }
       case 'candidate': {
         const data = msg.data || {};
-        const connectionId = data.connectionId || msg.from;
+        const connectionId = data.connectionId;
         const candidate = {
           candidate: data.candidate,
           sdpMLineIndex: data.sdpMLineIndex,
           sdpMid: data.sdpMid,
           datetime: Date.now()
         };
-
-        if (connectionPair.has(connectionId)) {
-          const pair = connectionPair.get(connectionId);
-          const otherWs = pair[0] === ws ? pair[1] : (pair[1] === ws ? pair[0] : null);
-          if (otherWs && otherWs.readyState === WebSocket.OPEN) {
-            safeSend(otherWs, { from: connectionId, to: '', type: 'candidate', data: candidate });
-            break;
-          }
-        }
-
         clients.forEach((_v, clientWs) => {
           if (clientWs !== ws) {
             safeSend(clientWs, { from: connectionId, to: '', type: 'candidate', data: candidate });
@@ -202,24 +158,6 @@ wss.on('connection', (ws) => {
         break;
     }
   });
-});
-
-// Heartbeat interval to evict dead/ghost connections immediately
-const heartbeatInterval = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) {
-      cleanupSocket(ws);
-      return ws.terminate();
-    }
-    ws.isAlive = false;
-    try {
-      ws.ping();
-    } catch (_) {}
-  });
-}, 15000);
-
-wss.on('close', () => {
-  clearInterval(heartbeatInterval);
 });
 
 server.listen(PORT, () => {

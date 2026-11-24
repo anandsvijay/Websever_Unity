@@ -28,11 +28,6 @@ let inputRemoting = null;
 let sender = null;
 let inputChannel = null;
 let isFillMode = false;
-let isUnityConnected = false;
-let hasReceivedVideoTrack = false;
-let waitingLogShown = false;
-let handshakeRetryTimer = null;
-let reconnectTimer = null;
 
 function addLog(msg) {
   const line = document.createElement('div');
@@ -219,21 +214,16 @@ videoElement.addEventListener('mousedown', handlePointerDown);
 videoElement.addEventListener('touchstart', handlePointerDown, { passive: true });
 
 async function start() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
   try {
-    if (!waitingLogShown) {
-      addLog('Connecting to signaling server...');
-    }
+    addLog('Fetching server configuration...');
     const serverConfig = await getServerConfig();
     const useWebSocket = serverConfig.useWebSocket;
     const customSignalingUrl = serverConfig.signalingUrl || getSignalingUrl();
 
+    addLog(`Signaling mode: ${useWebSocket ? 'WebSocket' : 'HTTP'}`);
     const signaling = useWebSocket ? new WebSocketSignaling(1000, customSignalingUrl) : new Signaling();
-    if (!waitingLogShown && signaling.websocketUrl) {
-      addLog(`Signaling Server: ${signaling.websocketUrl}`);
+    if (signaling.websocketUrl) {
+      addLog(`Signaling Server URL: ${signaling.websocketUrl}`);
     }
     const rtcConfig = getRTCConfiguration();
 
@@ -241,77 +231,48 @@ async function start() {
 
     // Diagnostics: ICE & Connection state changes
     renderstreaming.onIceConnectionStateChange = (state) => {
-      if (isUnityConnected) {
-        addLog(`ICE state: ${state}`);
-      }
-      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-        if (isUnityConnected) {
-          addLog('Unity stream disconnected. Waiting for Unity to start again...');
-        }
-        handleUnityDisconnect();
+      addLog(`ICE state: ${state}`);
+      if (state === 'failed') {
+        addLog('ICE connection failed. Ensure PC firewall allows UDP ports or restart.');
       } else if (state === 'connected' || state === 'completed') {
-        addLog('ICE media connection established!');
+        addLog('ICE connection established successfully!');
       }
     };
 
     renderstreaming.onConnectionStateChange = (state) => {
-      if (isUnityConnected) {
-        addLog(`Peer connection: ${state}`);
-      }
-      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-        handleUnityDisconnect();
-      }
+      addLog(`Peer connection: ${state}`);
     };
 
-    renderstreaming.onIceGatheringStateChange = () => {};
+    renderstreaming.onIceGatheringStateChange = (state) => {
+      addLog(`ICE gathering: ${state}`);
+    };
 
-    renderstreaming.onConnect = () => {
-      // NOTE: onConnect only means the signaling server registered our session ID.
-      // Do NOT log "Connected to Unity" yet — Unity might not be open yet!
-      if (!waitingLogShown) {
-        addLog('Signaling ready. Waiting for Unity Editor / App to start...');
-        waitingLogShown = true;
-      }
+    renderstreaming.onConnect = (connectionId) => {
+      addLog(`Signaling session ready (id=${connectionId}). Waiting for Unity...`);
+      // IMPORTANT: Do NOT add dummy recvonly transceivers here.
+      // Unity's Broadcast component adds its VideoStreamSender track upon receiving
+      // the dataChannel offer and sends a renegotiation offer back with the real track.
       setupInputChannel();
-      scheduleHandshakeRetry();
     };
 
-    renderstreaming.onGotAnswer = (connectionId) => {
-      clearHandshakeRetry();
-      if (!isUnityConnected) {
-        isUnityConnected = true;
-        waitingLogShown = false;
-        addLog(`Connected to Unity! (connectionId=${connectionId})`);
-      }
+    renderstreaming.onGotOffer = () => {
+      addLog('Received stream Offer from Unity. Applying mobile codec preferences...');
+      applyMobileCodecPreferences();
     };
 
-    renderstreaming.onGotOffer = (connectionId) => {
-      clearHandshakeRetry();
-      if (!isUnityConnected) {
-        isUnityConnected = true;
-        waitingLogShown = false;
-        addLog(`Connected to Unity! (connectionId=${connectionId})`);
-      }
-      addLog('Received video stream Offer from Unity.');
+    renderstreaming.onGotAnswer = () => {
+      addLog('Connected to Unity! (Received SDP Answer from Unity)');
     };
 
-    renderstreaming.onDisconnect = () => {
-      if (isUnityConnected) {
-        addLog('Unity Editor / App stopped. Waiting for Unity to start again...');
-      }
-      handleUnityDisconnect();
+    renderstreaming.onDisconnect = (connectionId) => {
+      addLog(`Disconnected from Unity (${connectionId}). Reconnecting in 3s...`);
+      cleanup();
+      setTimeout(start, 3000);
     };
 
     renderstreaming.onTrackEvent = (data) => {
       const track = data.track;
       if (!track) return;
-
-      clearHandshakeRetry();
-      if (!isUnityConnected) {
-        isUnityConnected = true;
-        waitingLogShown = false;
-        addLog('Connected to Unity!');
-      }
       addLog(`Received remote ${track.kind} track (id=${track.id}).`);
 
       if (!videoElement.srcObject) {
@@ -328,88 +289,23 @@ async function start() {
 
       track.onunmute = () => {
         addLog(`Remote ${track.kind} track unmuted (media packets flowing).`);
-        if (track.kind === 'video' || (videoElement.srcObject && videoElement.srcObject.getVideoTracks().length > 0)) {
-          attemptPlay();
-        }
+        attemptPlay();
       };
 
+      attemptPlay();
       if (track.kind === 'video') {
-        hasReceivedVideoTrack = true;
-        // Re-assign srcObject when video track is added after audio track so <video> attaches the video decoder
-        const currentStream = videoElement.srcObject;
-        videoElement.srcObject = currentStream;
-        attemptPlay();
         startVideoStatsCheck();
       }
     };
 
+    addLog('Starting signaling connection...');
     await renderstreaming.start();
     await renderstreaming.createConnection();
+    addLog('Connection initialized. Waiting for Unity...');
   } catch (err) {
-    addLog(`Connection retry: ${err.message}`);
-    scheduleReconnect(4000);
+    addLog(`Error: ${err.message}`);
+    setTimeout(start, 4000);
   }
-}
-
-function clearHandshakeRetry() {
-  if (handshakeRetryTimer) {
-    clearTimeout(handshakeRetryTimer);
-    handshakeRetryTimer = null;
-  }
-}
-
-function scheduleHandshakeRetry() {
-  clearHandshakeRetry();
-  handshakeRetryTimer = setTimeout(async () => {
-    if (hasReceivedVideoTrack) return;
-
-    // Unity hasn't sent a video track yet (either Unity isn't open yet, or the initial offer was missed).
-    // Quietly rotate to a fresh connectionId offer so the browser connects automatically without manual refresh!
-    try {
-      if (inputRemoting) {
-        inputRemoting.stopSending();
-        inputRemoting = null;
-      }
-      if (inputChannel) {
-        try { inputChannel.close(); } catch (_) {}
-        inputChannel = null;
-      }
-      sender = null;
-      isUnityConnected = false;
-
-      if (renderstreaming) {
-        await renderstreaming.createConnection();
-      } else {
-        scheduleReconnect(2000);
-      }
-    } catch (_) {
-      scheduleReconnect(3000);
-    }
-  }, 4500);
-}
-
-function handleUnityDisconnect() {
-  clearHandshakeRetry();
-  const wasConnected = isUnityConnected;
-  isUnityConnected = false;
-  hasReceivedVideoTrack = false;
-  if (wasConnected) {
-    waitingLogShown = false;
-  }
-  cleanup();
-  scheduleReconnect(2500);
-}
-
-function scheduleReconnect(delayMs) {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null;
-    if (renderstreaming) {
-      try { await renderstreaming.stop(); } catch (_) {}
-      renderstreaming = null;
-    }
-    start();
-  }, delayMs);
 }
 
 function applyMobileCodecPreferences() {
@@ -519,19 +415,14 @@ function setupInputChannel() {
     }
 
     inputChannel.onclose = () => {
+      addLog('Input channel closed.');
       if (inputRemoting) {
         inputRemoting.stopSending();
-      }
-      if (isUnityConnected) {
-        addLog('Unity input channel closed. Waiting for Unity to start again...');
-        handleUnityDisconnect();
       }
     };
 
     inputChannel.onerror = (e) => {
-      if (isUnityConnected) {
-        addLog(`Input channel error: ${e.message || 'unknown'}`);
-      }
+      addLog(`Input channel error: ${e.message || 'unknown'}`);
     };
   } catch (err) {
     addLog(`Failed to setup input: ${err.message}`);
@@ -539,7 +430,6 @@ function setupInputChannel() {
 }
 
 function cleanup() {
-  clearHandshakeRetry();
   if (statsTimer) {
     clearInterval(statsTimer);
     statsTimer = null;

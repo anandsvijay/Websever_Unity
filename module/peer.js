@@ -57,6 +57,8 @@ export default class Peer extends EventTarget {
       _this.log(`iceGatheringState changed:${_this.pc.iceGatheringState}`);
       _this.dispatchEvent(new CustomEvent('icegatheringstatechange', { detail: { state: _this.pc.iceGatheringState } }));
     };
+
+    this.loopResendOffer();
   }
 
   async _onNegotiation() {
