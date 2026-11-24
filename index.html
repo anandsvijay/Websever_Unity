@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Football AR Stream</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="container">
+    <!-- Screen Adaptable Video Frame -->
+    <div id="videoFrame" class="fit-mode">
+      <video id="videoFeed" playsinline webkit-playsinline autoplay muted></video>
+
+      <!-- Tap to Play / Resume Overlay for Mobile Browsers -->
+      <div id="playOverlay" class="hidden">
+        <div class="play-btn-circle">▶</div>
+        <p>Tap to Start Stream</p>
+      </div>
+
+      <!-- Mobile Orientation Helper -->
+      <div id="orientationNotice" class="hidden">
+        <span>↻ Rotate to landscape for best view</span>
+      </div>
+    </div>
+
+    <!-- Floating Top Bar Controls -->
+    <div id="controls">
+      <button id="fitToggleBtn" type="button" title="Toggle Aspect Mode">Aspect: Fit</button>
+      <button id="fullscreenBtn" type="button">⛶ Fullscreen</button>
+      <button id="toggleLogBtn" type="button">Logs</button>
+    </div>
+
+    <!-- Collapsible Log Window -->
+    <div id="logWindow">
+      <div id="logHeader">
+        <span>Connection Logs</span>
+        <button id="clearLogBtn" type="button">Clear</button>
+      </div>
+      <div id="logContent"></div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
